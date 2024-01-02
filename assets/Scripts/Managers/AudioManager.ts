@@ -1,7 +1,7 @@
 import { Node, AudioSource, AudioClip, resources, director } from 'cc';
 
 /**
- * this is a sington class for audio play, can be easily called from anywhere in you project.
+ * это класс Sington для воспроизведения аудио, его можно легко вызвать из любого места проекта.
  */ 
 export class AudioManager {
     private static _instance: AudioManager;
@@ -17,17 +17,17 @@ export class AudioManager {
     private _audioSource: AudioSource;
     
     constructor() {
-        // create a node as audioMgr
+        // Создаём аудиоменеджер
         let audioManager = new Node();
         audioManager.name = '__audioManager__';
 
-        // add to the scene.
+        // Добавляем на сцену
         director.getScene().addChild(audioManager);
 
-        // make it as a persistent node, so it won't be destroied when scene change.
+        // Делаем его постоянным, чтобы он не был уничтожен при смене сцены
         director.addPersistRootNode(audioManager);
 
-        // add AudioSource componrnt to play audios.
+        // добавляем AudioSource для воспроизведения аудио
         this._audioSource = audioManager.addComponent(AudioSource);
     }
 
@@ -36,9 +36,8 @@ export class AudioManager {
     }
 
     /**
-     * @en
-     * play short audio, such as strikes,explosions
-     * @param sound clip or url for the audio
+     * Воспроизводить звуки один раз, например, взрывы, сбор монет
+     * @param sound
      * @param volume 
      */
     playOneShot(sound: AudioClip | string, volume: number = 1.0) {
@@ -58,9 +57,8 @@ export class AudioManager {
     }
 
     /**
-     * @en
-     * play long audio, such as the bg music
-     * @param sound clip or url for the sound
+     * Возпроизводит мелодию, например фоновая музыка
+     * @param sound
      * @param volume 
      */
     play(sound: AudioClip | string, volume: number = 1.0) {
@@ -83,23 +81,14 @@ export class AudioManager {
         }
     }
 
-    /**
-     * stop the audio play
-     */
     stop() {
         this._audioSource.stop();
     }
 
-    /**
-     * pause the audio play
-     */
     pause() {
         this._audioSource.pause();
     }
 
-    /**
-     * resume the audio play
-     */
     resume(){
         this._audioSource.play();
     }

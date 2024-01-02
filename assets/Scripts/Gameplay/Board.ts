@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, UITransform, CCInteger, Prefab, instantiate, Input, Vec3, AudioClip, CCFloat } from 'cc';
+import { _decorator, Component, Node, UITransform, CCInteger, Prefab, instantiate, Input, Vec3, AudioClip, CCFloat, log } from 'cc';
 import { Item, ItemState } from './Item';
 import { AudioManager } from '../Managers/AudioManager';
 import { ScoreManager } from '../Managers/ScoreManager';
@@ -17,6 +17,11 @@ interface FallItem {
     position: Vec3
 }
 
+enum BombEffect {
+    BE_NONE,
+    BE_BOMB
+}
+
 interface GameObject {
     selectedRow: number,
 	selectedCol: number,
@@ -26,7 +31,8 @@ interface GameObject {
     secondSelectedPosition: Vec3,
     yOffset: number,
     xOffset: number,
-    isBomb: boolean
+    selectedType: BombEffect,
+    secondType: BombEffect
 }
 
 interface AnimationCallbacks {
@@ -40,13 +46,20 @@ interface AnimationData {
     callbacks: AnimationCallbacks
 }
 
+interface MoveItem {
+    position: Vec3,
+    target: Vec3,
+    item: Node
+}
+
 enum BoardStage {
     BS_PICK,
     BS_MOVE,
     BS_REVERT,
     BS_REMOVE,
     BS_REFILL,
-    BS_ANIMATION_FALING
+    BS_ANIMATION_FALING,
+    BS_BONUS_STACK
 }
 
 @ccclass('Board')
@@ -99,6 +112,12 @@ export class Board extends Component {
     @property({group: { name: 'Audio settings' }, type: AudioClip, tooltip: 'Звук сбора элементов 3+'})
     public stackSound: AudioClip | null = null;
 
+    @property({group: { name: 'Audio settings' }, type: AudioClip, tooltip: 'Звук сбора бомбы'})
+    public createBombSound: AudioClip | null = null;
+
+    @property({group: { name: 'Audio settings' }, type: AudioClip, tooltip: 'Звук взрыва бомбы'})
+    public explosionBombSound: AudioClip | null = null;
+
     @property({group: { name: 'Audio settings' }, type: AudioClip, tooltip: 'Звук при выигрыше в раунде'})
     public winSound: AudioClip | null = null;
 
@@ -113,13 +132,13 @@ export class Board extends Component {
         secondSelectedPosition: new Vec3(0, 0, 0),
         yOffset: 0,
         xOffset: 0,
-        isBomb: false
+        selectedType: BombEffect.BE_NONE,
+        secondType: BombEffect.BE_NONE
     };
 
     private itemSizeWithPadding = 0;
 
     private emptyId = -1;
-    private bombValue = 0;
     private grid: Array<Array<GridItem>> = [];
     private fallItems: Array<FallItem> = [];
 
@@ -131,6 +150,8 @@ export class Board extends Component {
     private boardGenerator: BoardGenerator;
     private boardItems: BoardItems;
     private boardAnimations: BoardAnimations;
+
+    private moveItems: Array<MoveItem>;
 
     /**
      * Инициализация
@@ -210,9 +231,28 @@ export class Board extends Component {
                 callbacks: {
                     end: () => {
                         Board.boardStage = BoardStage.BS_REFILL;
-            
+
                         this.fallItems = [];
+
+                        this.checkAfterSwitch();
+                    }
+                }
+            },
+            moveAnimation: {
+                currentTime: 0,
+                speed: 0.15,
+                callbacks: {
+                    end: () => {
+                        this.moveItems = [];
+
+                        this.grid[BoardBomb.bombPosition.row][BoardBomb.bombPosition.col].item.getComponent(Item).setItemData(BoardBomb.bombId, true);
+
+                        BoardBomb.bombPosition.row = -1;
+                        BoardBomb.bombPosition.col = -1;
+
+                        Board.boardStage = BoardStage.BS_REMOVE;
             
+                        this.revertItems();
                         this.checkAfterSwitch();
                     }
                 }
@@ -234,6 +274,10 @@ export class Board extends Component {
         if (Board.boardStage === BoardStage.BS_ANIMATION_FALING && this.boardAnimations) {
             this.boardAnimations.fall(deltaTime, this.fallItems);
         }
+
+        if (Board.boardStage === BoardStage.BS_BONUS_STACK && this.boardAnimations) {
+            this.boardAnimations.moveToTarget(deltaTime, this.moveItems);
+        }
     }
 
     /**
@@ -241,8 +285,8 @@ export class Board extends Component {
      */
     onSwitchEnd() {
         Board.gameObject.selectedRow = this.emptyId;
+
         this.isRevertMove = false;
-        Board.boardStage = BoardStage.BS_PICK;
 
         this.grid.forEach((row) => {
             row.forEach((col) => {
@@ -252,6 +296,8 @@ export class Board extends Component {
             });
         });
 
+        Board.boardStage = BoardStage.BS_PICK;
+
         if (this.scoreManager?.isWin) {
             this.node.active = false;
 
@@ -260,62 +306,79 @@ export class Board extends Component {
                 Board.audioManager.playOneShot(this.winSound);
             }
         }
+
+        console.log(this.grid);
+        
+    }
+
+    /**
+     * Событие при создании бомбы
+     * @param moveItems 
+     */
+    onCreateBomb(moveItems: Array<MoveItem>) {
+        this.moveItems = moveItems;
+
+        Board.boardStage = BoardStage.BS_BONUS_STACK;
+
+        if (Board.audioManager && this.createBombSound) {
+            Board.audioManager.playOneShot(this.createBombSound, 0.5);
+        }
     }
 
     /**
      * Проверяем совпадения после перемещения
      */
     checkAfterSwitch() {
+        // Провека не идёт ли сейчас стадия падения гемов
         if (Board.boardStage === BoardStage.BS_REMOVE) {
             this.checkFalling();
 
             return;
         }
 
+        // Провека не идёт ли сейчас стадия создания гемов
         if (Board.boardStage === BoardStage.BS_REFILL) {
             this.createNewItems();
 
             return;
         }
 
-        if (Board.gameObject.isBomb) {
+        // Провека - не перемещаем ли мы сейчас бомбу
+        if (Board.gameObject.selectedType === BombEffect.BE_BOMB || Board.gameObject.secondType === BombEffect.BE_BOMB) {
             const onExplosionEnd = () => {
-                this.hideRemoveItems();
+                this.hideRemoveItems(this.explosionBombSound);
             }
 
-            BoardBomb.explosionBomb(this.grid, Board.gameObject.secondSelectedRow, Board.gameObject.secondSelectedCol, this.emptyId, onExplosionEnd);
+            if (Board.gameObject.selectedType === BombEffect.BE_BOMB) {
+                BoardBomb.explosionBomb(this.grid, Board.gameObject.secondSelectedRow, Board.gameObject.secondSelectedCol, this.emptyId, onExplosionEnd);
+            } else {
+                BoardBomb.explosionBomb(this.grid, Board.gameObject.selectedRow, Board.gameObject.selectedCol, this.emptyId, onExplosionEnd);
+            }
 
             return;
         }
 
+        // Проверка на стак бомбы
         const isStackBombSelected = BoardBomb.isStackBomb(this.grid, Board.gameObject.selectedRow, Board.gameObject.selectedCol);
         const isStackBombPrev = BoardBomb.isStackBomb(this.grid, Board.gameObject.secondSelectedRow, Board.gameObject.secondSelectedCol);
 
         if (isStackBombSelected || isStackBombPrev) {
-            const onCreateBomb = (prevValue: number, row: number, col: number) => {
-                this.grid[row][col].value = BoardBomb.bombId;
-                this.bombValue = prevValue;
-                this.grid[row][col].item.getComponent(Item).setBodyBomb(prevValue);
-    
-                Board.boardStage = BoardStage.BS_REMOVE;
-    
-                this.hideRemoveItems();
-            }
-
             if (isStackBombSelected) {
-                BoardBomb.createBomb(this.grid, Board.gameObject.selectedRow, Board.gameObject.selectedCol, this.emptyId, onCreateBomb);
+                BoardBomb.createBomb(this.grid, Board.gameObject.selectedRow, Board.gameObject.selectedCol, this.emptyId, this.onCreateBomb.bind(this));
             }
             
             if (isStackBombPrev) {
-                BoardBomb.createBomb(this.grid, Board.gameObject.secondSelectedRow, Board.gameObject.secondSelectedCol, this.emptyId, onCreateBomb);
+                BoardBomb.createBomb(this.grid, Board.gameObject.secondSelectedRow, Board.gameObject.secondSelectedCol, this.emptyId, this.onCreateBomb.bind(this));
             }
             
             return;
         }
 
+        // Проверка на стак 3+ в ряд
         const isStackSelected = BoardComparison.isLineStacking(this.grid, Board.gameObject.selectedRow, Board.gameObject.selectedCol);
         const isStackPrevSelected = BoardComparison.isLineStacking(this.grid, Board.gameObject.secondSelectedRow, Board.gameObject.secondSelectedCol);
 
+        // Если стака нет, то возвращаем гем обратно
         if (!isStackSelected && !isStackPrevSelected) {
             this.isRevertMove = true;
 
@@ -328,6 +391,7 @@ export class Board extends Component {
             return;
         }
 
+        // Иначе отмечаем элементы которые нужно удалить и удаляем их
         Board.boardStage = BoardStage.BS_REMOVE;
 
         if (isStackSelected) {
@@ -391,7 +455,7 @@ export class Board extends Component {
      * Удаляем элемента с доски
      * Добавляем очки, запуск анимации сбора элемента, звук сбора
      */
-    hideRemoveItems() {
+    hideRemoveItems(costomSound: AudioClip = null) {
         for (let row = 0; row < this.countRows; row++) {
             for (let col = 0; col < this.countCols; col++) {
                 if (this.grid[row][col].value === this.emptyId) {
@@ -401,29 +465,41 @@ export class Board extends Component {
             }
         }
 
-        if (Board.audioManager && this.stackSound) {
-            Board.audioManager.playOneShot(this.stackSound, 0.5);
+        if (Board.audioManager) {
+            const sound = costomSound ?? this.stackSound
+  
+            if (sound) {
+                Board.audioManager.playOneShot(sound, 0.5);
+            }
         }
 
-        if (this.stack) {
-            const {
-                selectedRow,
-                selectedCol,
-                secondSelectedRow,
-                secondSelectedCol
-            } = Board.gameObject;
-            const tempRow = this.grid[selectedRow][selectedCol].row;
-            const tempCol = this.grid[selectedRow][selectedCol].col;
-
-            this.grid[selectedRow][selectedCol].row = this.grid[secondSelectedRow][secondSelectedCol].row;
-            this.grid[selectedRow][selectedCol].col = this.grid[secondSelectedRow][secondSelectedCol].col;
-            this.grid[secondSelectedRow][secondSelectedCol].row = tempRow;
-            this.grid[secondSelectedRow][secondSelectedCol].col = tempCol;
-
-            this.stack = false;
-        }
-        
+        this.revertItems();
         this.checkAfterSwitch();
+    }
+
+    /**
+     * Меняет позиции в сетке у элементов местами
+     */
+    revertItems() {
+        if (!this.stack) {
+            return;
+        }
+
+        const {
+            selectedRow,
+            selectedCol,
+            secondSelectedRow,
+            secondSelectedCol
+        } = Board.gameObject;
+        const tempRow = this.grid[selectedRow][selectedCol].row;
+        const tempCol = this.grid[selectedRow][selectedCol].col;
+
+        this.grid[selectedRow][selectedCol].row = this.grid[secondSelectedRow][secondSelectedCol].row;
+        this.grid[selectedRow][selectedCol].col = this.grid[secondSelectedRow][secondSelectedCol].col;
+        this.grid[secondSelectedRow][secondSelectedCol].row = tempRow;
+        this.grid[secondSelectedRow][secondSelectedCol].col = tempCol;
+
+        this.stack = false;
     }
 
     /**
@@ -442,12 +518,9 @@ export class Board extends Component {
                     this.grid[row][col].item.setPosition(this.grid[row - 1][col].item.getPosition());
                     this.grid[row - 1][col].item.getComponent(Item).hideBody();
 
-                    if (this.grid[row][col].value !== BoardBomb.bombId) {
-                        this.grid[row][col].item.getComponent(Item).setItemData(this.itemSize, this.grid[row][col].value);
-                    } else if (this.bombValue !== -1) {
-                        this.grid[row][col].item.getComponent(Item).setBodyBomb(this.bombValue);
-                        this.bombValue = -1;
-                    }
+                    const isBomb = this.grid[row][col].value === BoardBomb.bombId;
+
+                    this.grid[row][col].item.getComponent(Item).setItemData(this.grid[row][col].value, isBomb);
 
                     this.fallItems.push({
                         item: this.grid[row][col].item,
@@ -475,24 +548,27 @@ export class Board extends Component {
     createNewItems() {
         let countNewItems = 0;
 
+        // Создаём новые элементы в самом верху, так как все элементы опускаются вниз
         for (let col = 0; col < this.countCols; col++) {
             const currentCol = this.grid[0][col];
 
             if (currentCol.value === this.emptyId) {
                 currentCol.value = Math.floor(Math.random() * this.itemVariantCount);
 
-                currentCol.item.getComponent(Item).setItemData(currentCol.size, currentCol.value);
+                currentCol.item.getComponent(Item).setItemData(currentCol.value);
 
                 countNewItems++;
             }
         }
 
+        // Если новые элементы были созданы, проверяем есть ли что-то под ними, может им нужно упасть вниз
         if (countNewItems) {
             Board.boardStage === BoardStage.BS_REMOVE;
             this.checkFalling();
         } else {
             let isHaveEmpty = false;
 
+            // Проверяем нет ли пустых ячеек на поле
             this.grid.forEach((row) => {
                 row.forEach((col) => {
                     if (col.value === this.emptyId) {
@@ -501,6 +577,7 @@ export class Board extends Component {
                 });
             });
 
+            // Если пустые ячейки есть, запускаем падениние гемов
             if (isHaveEmpty) {
                 Board.boardStage === BoardStage.BS_REMOVE;
                 this.checkFalling();
@@ -508,10 +585,38 @@ export class Board extends Component {
                 return;
             }
 
-            let combo = 0;
+            let hasBomb = false;
 
+            // Проверяем не стакнулась ли бомба
             for (let row = 0; row < this.countRows; row++) {
                 for (let col = 0; col < this.countCols; col++) {
+                    if (BoardBomb.isStackBomb(this.grid, row, col)) {
+                        BoardBomb.createBomb(this.grid, row, col, this.emptyId, this.onCreateBomb.bind(this));
+
+                        hasBomb = true;
+
+                        break;
+                    }
+                }
+
+                if (hasBomb) {
+                    break;
+                }
+            }
+
+            if (hasBomb) {
+                return;
+            }
+
+            let combo = 0;
+
+            // Проверяем не стакнулись ли элементы 3+ в ряд
+            for (let row = 0; row < this.countRows; row++) {
+                for (let col = 0; col < this.countCols; col++) {
+                    if (this.grid[row][col].value === BoardBomb.bombId) {
+                        continue;
+                    }
+
                     if (col <= this.countCols - 3 && this.grid[row][col].value === this.grid[row][col + 1].value && this.grid[row][col].value === this.grid[row][col + 2].value) {
                         combo++;
 
@@ -526,12 +631,16 @@ export class Board extends Component {
                 }
             }
 
+            // Если стакнулись то запускаем анимации, добавляем очки, удаляем гемы
             if (combo > 0) {
                 Board.boardStage === BoardStage.BS_REMOVE;
 
                 this.scoreManager.addCombo();
-                this.hideRemoveItems();
-            } else {
+
+                this.scheduleOnce(() => {
+                    this.hideRemoveItems();
+                }, 0.2);
+            } else { // Иначе заканчиваем перемещение
                 this.onSwitchEnd();
             }
         }
@@ -567,6 +676,10 @@ class BoardComparison {
      * @returns 
      */
     static isLineStacking(grid: Array<Array<GridItem>>, row: number, col: number) {
+        if (grid[row][col].value === BoardBomb.bombId) {
+            return false;
+        }
+
         return BoardComparison.isVerticalLineStacking(grid, row, col) || BoardComparison.isHorizontalLineStacking(grid, row, col);
     }
 
@@ -634,6 +747,14 @@ class BoardBomb {
      * ID бомбы
      */
     static bombId = 100;
+
+    /**
+     * Позиция бомбы в момент создания
+     */
+    static bombPosition = {
+        row: -1,
+        col: -1
+    }
 
     /**
      * Количество строк
@@ -708,8 +829,8 @@ class BoardBomb {
         return isLeftEqual && isTopEqual && isLeftTopEqual;
     }
 
-    static createBomb(grid: Array<Array<GridItem>>, row: number, col: number, emptyId: number, callback: (prevValue: number, row: number, col: number) => void) {
-        const prevValue = grid[row][col].value;
+    static createBomb(grid: Array<Array<GridItem>>, row: number, col: number, emptyId: number, callback: (moveItems: Array<MoveItem>) => void) {
+        const moveItems: Array<MoveItem> = [];
         let isBomb = false;
 
         switch (true) {
@@ -717,6 +838,24 @@ class BoardBomb {
                 grid[row][col + 1].value = emptyId;
                 grid[row + 1][col].value = emptyId;
                 grid[row + 1][col + 1].value = emptyId;
+
+                moveItems.push({
+                    position: grid[row][col + 1].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row][col + 1].item.getPosition()),
+                    item: grid[row][col + 1].item
+                });
+
+                moveItems.push({
+                    position: grid[row + 1][col].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row + 1][col].item.getPosition()),
+                    item: grid[row + 1][col].item
+                });
+
+                moveItems.push({
+                    position: grid[row + 1][col + 1].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row + 1][col + 1].item.getPosition()),
+                    item: grid[row + 1][col + 1].item
+                });
 
                 isBomb = true;
 
@@ -726,6 +865,24 @@ class BoardBomb {
                 grid[row - 1][col].value = emptyId;
                 grid[row - 1][col + 1].value = emptyId;
 
+                moveItems.push({
+                    position: grid[row][col + 1].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row][col + 1].item.getPosition()),
+                    item: grid[row][col + 1].item
+                });
+
+                moveItems.push({
+                    position: grid[row - 1][col].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row - 1][col].item.getPosition()),
+                    item: grid[row - 1][col].item
+                });
+
+                moveItems.push({
+                    position: grid[row - 1][col + 1].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row - 1][col + 1].item.getPosition()),
+                    item: grid[row - 1][col + 1].item
+                });
+
                 isBomb = true;
 
                 break;
@@ -733,6 +890,24 @@ class BoardBomb {
                 grid[row][col - 1].value = emptyId;
                 grid[row + 1][col].value = emptyId;
                 grid[row + 1][col - 1].value = emptyId;
+
+                moveItems.push({
+                    position: grid[row][col - 1].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row][col - 1].item.getPosition()),
+                    item: grid[row][col - 1].item
+                });
+
+                moveItems.push({
+                    position: grid[row + 1][col].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row + 1][col].item.getPosition()),
+                    item: grid[row + 1][col].item
+                });
+
+                moveItems.push({
+                    position: grid[row + 1][col - 1].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row + 1][col - 1].item.getPosition()),
+                    item: grid[row + 1][col - 1].item
+                });
 
                 isBomb = true;
 
@@ -742,53 +917,151 @@ class BoardBomb {
                 grid[row - 1][col].value = emptyId;
                 grid[row - 1][col - 1].value = emptyId;
 
+                moveItems.push({
+                    position: grid[row][col - 1].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row][col - 1].item.getPosition()),
+                    item: grid[row][col - 1].item
+                });
+
+                moveItems.push({
+                    position: grid[row - 1][col].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row - 1][col].item.getPosition()),
+                    item: grid[row - 1][col].item
+                });
+
+                moveItems.push({
+                    position: grid[row - 1][col - 1].item.getPosition(),
+                    target: grid[row][col].item.getPosition().subtract(grid[row - 1][col - 1].item.getPosition()),
+                    item: grid[row - 1][col - 1].item
+                });
+
                 isBomb = true;
 
                 break;
         }
 
-        isBomb && callback(prevValue, row, col);
+        if (isBomb) {
+            BoardBomb.bombPosition.row = row;
+            BoardBomb.bombPosition.col = col;
+
+            grid[row][col].value = BoardBomb.bombId;
+
+            callback(moveItems);
+        }
     }
 
     static explosionBomb(grid: Array<Array<GridItem>>, row: number, col: number, emptyId: number, callback: () => void) {
+        const otherBombs = [];
         grid[row][col].value = emptyId;
 
+        // Проверяем что с нужной стороны не пусто, и убираем ячейку
+
+        // Справа
         if (col + 1 !== BoardBomb.countCols) {
+            if (grid[row][col + 1].value === BoardBomb.bombId) {
+                otherBombs.push({
+                    row,
+                    col: col + 1
+                })
+            }
+
             grid[row][col + 1].value = emptyId;
         }
 
+        // Слева
         if (col !== 0) {
+            if (grid[row][col - 1].value === BoardBomb.bombId) {
+                otherBombs.push({
+                    row,
+                    col: col - 1
+                })
+            }
+
             grid[row][col - 1].value = emptyId;
         }
 
+        // Снизу
         if (row + 1 !== BoardBomb.countRows) {
+            if (grid[row + 1][col].value === BoardBomb.bombId) {
+                otherBombs.push({
+                    row: row + 1,
+                    col
+                })
+            }
+
             grid[row + 1][col].value = emptyId;
         }
 
+        // Сверху
         if (row !== 0) {
+            if (grid[row - 1][col].value === BoardBomb.bombId) {
+                otherBombs.push({
+                    row: row - 1,
+                    col
+                })
+            }
+            
             grid[row - 1][col].value = emptyId;
         }
 
+        // Нижний правый угол
         if (col + 1 !== BoardBomb.countCols && row + 1 !== BoardBomb.countRows) {
+            if (grid[row + 1][col + 1].value === BoardBomb.bombId) {
+                otherBombs.push({
+                    row: row + 1,
+                    col: col + 1
+                })
+            }
+            
             grid[row + 1][col + 1].value = emptyId;
         }
 
-        if (col !== 0 && row !== 0) {
-            grid[row - 1][col - 1].value = emptyId;
-        }
-
-        if (col + 1 !== BoardBomb.countCols && row !== 0) {
-            grid[row - 1][col + 1].value = emptyId;
-        }
-
+        // Нижний левый угол
         if (col !== 0 && row + 1 !== BoardBomb.countRows) {
+            if (grid[row + 1][col - 1].value === BoardBomb.bombId) {
+                otherBombs.push({
+                    row: row + 1,
+                    col: col - 1
+                })
+            }
+            
             grid[row + 1][col - 1].value = emptyId;
         }
 
-        Board.gameObject.isBomb = false;
-        Board.boardStage = BoardStage.BS_REMOVE;
+        // Верхний левый угол
+        if (col !== 0 && row !== 0) {
+            if (grid[row - 1][col - 1].value === BoardBomb.bombId) {
+                otherBombs.push({
+                    row: row - 1,
+                    col: col - 1
+                })
+            }
+            
+            grid[row - 1][col - 1].value = emptyId;
+        }
 
-        callback();
+        // Верхний правый угол
+        if (col + 1 !== BoardBomb.countCols && row !== 0) {
+            if (grid[row - 1][col + 1].value === BoardBomb.bombId) {
+                otherBombs.push({
+                    row: row - 1,
+                    col: col + 1
+                })
+            }
+            
+            grid[row - 1][col + 1].value = emptyId;
+        }
+
+        Board.gameObject.selectedType = BombEffect.BE_NONE;
+        Board.gameObject.secondType = BombEffect.BE_NONE;
+
+        if (otherBombs.length) {
+            BoardBomb.explosionBomb(grid, otherBombs[0].row, otherBombs[0].col, emptyId, callback);
+        } else {
+            Board.boardStage = BoardStage.BS_REMOVE;
+
+            callback();
+        }
     }
 }
 
@@ -870,7 +1143,8 @@ class BoardGenerator {
 
                 const itemController = item.getComponent(Item);
 
-                itemController.setItemData(gridItem.size, gridItem.value);
+                itemController.setItemData(gridItem.value);
+                itemController.setBodySize(gridItem.size);
 
                 gridItem.item = item;
             }
@@ -1021,7 +1295,9 @@ class BoardItems {
         
         this._grid.forEach((row) => {
             row.forEach((col) => {
-                col.item.getComponent(Item).changeState(ItemState.STATE_DEFAULT);
+                if (col.value !== BoardBomb.bombId) {
+                    col.item.getComponent(Item).changeState(ItemState.STATE_DEFAULT);
+                }
             });
         });
 
@@ -1068,10 +1344,16 @@ class BoardItems {
         Board.gameObject.selectedPosition = this._grid[Board.gameObject.selectedRow][Board.gameObject.selectedCol].item.getPosition();
         Board.gameObject.secondSelectedPosition = this._grid[row][col].item.getPosition();
 
-        if (this._grid[row][col].value === BoardBomb.bombId || this._grid[Board.gameObject.selectedRow][Board.gameObject.selectedCol].value === BoardBomb.bombId) {
-            Board.gameObject.isBomb = true;
+        if (this._grid[row][col].value === BoardBomb.bombId) {
+            Board.gameObject.secondType = BombEffect.BE_BOMB;
         } else {
-            Board.gameObject.isBomb = false;
+            Board.gameObject.secondType = BombEffect.BE_NONE;
+        }
+
+        if (this._grid[Board.gameObject.selectedRow][Board.gameObject.selectedCol].value === BoardBomb.bombId) {
+            Board.gameObject.selectedType = BombEffect.BE_BOMB;
+        } else {
+            Board.gameObject.selectedType = BombEffect.BE_NONE;
         }
     }
 }
@@ -1100,10 +1382,20 @@ class BoardAnimations {
         callbacks: null
     };
 
+    /**
+     * Данные для анимации стака (сбор бомбы и т.п. из гемов)
+     */
+    private moveAnimation: AnimationData = {
+        currentTime: 0,
+        speed: 0.5,
+        callbacks: null
+    }
+
     constructor(params) {
         this.cellSize = params.cellSize;
         this.switchAnimation = params.switchAnimation;
         this.fallAnimation = params.fallAnimation;
+        this.moveAnimation = params.moveAnimation;
     }
 
     /**
@@ -1179,6 +1471,29 @@ class BoardAnimations {
 
             fallItems.forEach((fallItem) => {
                 fallItem.item.setPosition(fallItem.position.x, fallItem.position.y - this.cellSize * percent);
+            });
+        }
+    }
+
+    moveToTarget(deltaTime: number, items: Array<MoveItem>) {
+        this.moveAnimation.currentTime += deltaTime;
+
+        if (this.moveAnimation.currentTime > this.moveAnimation.speed) {
+            this.moveAnimation.currentTime = 0;
+
+            items.forEach((moveItem) => {
+                moveItem.item.getComponent(Item).hideBody();
+                moveItem.item.setPosition(moveItem.position);
+            });
+
+            this.moveAnimation.callbacks?.end();
+        } else {
+            const percent = this.moveAnimation.currentTime / this.moveAnimation.speed;
+
+            items.forEach((moveItem) => {
+                const target = new Vec3(moveItem.target.x * percent, moveItem.target.y * percent);
+
+                moveItem.item.setPosition(moveItem.position.x + target.x, moveItem.position.y + target.y);
             });
         }
     }

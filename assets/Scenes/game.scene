@@ -630,7 +630,7 @@
     "scoreManager": {
       "__id__": 17
     },
-    "winScore": 500,
+    "winScore": 200,
     "countRows": 6,
     "countCols": 8,
     "itemVariantCount": 5,
@@ -648,6 +648,14 @@
     },
     "stackSound": {
       "__uuid__": "0edf1896-e9ee-4a23-99a6-6d6ec19ac115",
+      "__expectedType__": "cc.AudioClip"
+    },
+    "createBombSound": {
+      "__uuid__": "6025decf-1058-4ad1-b4c5-b6d6bca34ca3",
+      "__expectedType__": "cc.AudioClip"
+    },
+    "explosionBombSound": {
+      "__uuid__": "cb91fec9-e8df-4ac7-a5df-d98f20f66506",
       "__expectedType__": "cc.AudioClip"
     },
     "winSound": {

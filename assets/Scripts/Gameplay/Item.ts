@@ -28,8 +28,8 @@ export class Item extends Component {
     @property({ type: [SpriteFrame] })
     public mouthList: SpriteFrame[] = [];
 
-    @property({ type: [SpriteFrame] })
-    public bombList: SpriteFrame[] = [];
+    @property({ type: SpriteFrame })
+    public bombSprite: SpriteFrame;
 
     private itemState: ItemState;
     private bodySprite: Sprite;
@@ -46,17 +46,27 @@ export class Item extends Component {
         this.setMouth();
     }
 
-    setItemData(size, id) {
-        this.setBodySprite(id);
-        this.setBodySize(size);
-        this.changeState(ItemState.STATE_DEFAULT);
+    setItemData(id, isBomb = false) {
+        this.setBodySprite(id, isBomb);
+
+        if (!isBomb) {
+            this.changeState(ItemState.STATE_DEFAULT);
+        }
     }
 
-    setBodySprite(spriteIndex) {
+    setBodySprite(spriteIndex, isBomb = false) {
         this.bodySprite = this.body?.getComponent(Sprite);
         this.bodyImagesList = this.bodySprite?.spriteAtlas.getSpriteFrames();
         
         if (!this.bodySprite || !this.bodyImagesList) {
+            return;
+        }
+
+        if (isBomb) {
+            this.eye.spriteFrame = null;
+            this.mouth.spriteFrame = null;
+            this.bodySprite.spriteFrame = this.bombSprite;
+
             return;
         }
 
@@ -134,47 +144,6 @@ export class Item extends Component {
         this.bodyTransform.setContentSize(size, size);
     }
 
-    setBodyBomb(spriteIndex) {
-        this.eye.spriteFrame = null;
-        this.mouth.spriteFrame = null;
-
-        let bombFrameIndex = 0;
-
-        switch (spriteIndex) {
-            case 0:
-            case 5:
-                bombFrameIndex = 0;
-
-                break;
-            case 1:
-            case 6:
-                bombFrameIndex = 1;
-
-                break;
-            case 2:
-            case 7:
-                bombFrameIndex = 2;
-
-                break;
-            case 3:
-            case 8:
-                bombFrameIndex = 3;
-
-                break;
-            case 4:
-            case 9:
-                bombFrameIndex = 4;
-
-                break;
-        }
-
-        if (!this.bodySprite) {
-            this.bodySprite = this.body?.getComponent(Sprite);
-        }
-
-        this.bodySprite.spriteFrame = this.bombList[bombFrameIndex];
-    }
-
     playAnimationDead() {
         this.changeState(ItemState.STATE_MATCHED);
 
@@ -192,7 +161,7 @@ export class Item extends Component {
 
         this.hideBody();
 
-        this.scheduleOnce(function() {
+        this.scheduleOnce(() => {
             cloneItem.destroy();
         }, 2);
     }
